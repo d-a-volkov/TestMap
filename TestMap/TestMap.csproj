@@ -14,6 +14,7 @@
     <PackageReference Include="Newtonsoft.Json" Version="13.0.4" />
     <PackageReference Include="OsmSharp" Version="6.2.0" />
     <PackageReference Include="QuickGraph" Version="3.6.61119.7" />
+    <PackageReference Include="Sandwych.MapMatchingKit" Version="0.1.5-alpha-128" />
   </ItemGroup>
 
 </Project>
