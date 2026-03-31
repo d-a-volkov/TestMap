@@ -37,6 +37,7 @@
             toolStripButton_Save = new ToolStripButton();
             openFileDialog1 = new OpenFileDialog();
             saveFileDialog1 = new SaveFileDialog();
+            toolStripButton1 = new ToolStripButton();
             toolStrip1.SuspendLayout();
             SuspendLayout();
             // 
@@ -70,7 +71,7 @@
             // 
             // toolStrip1
             // 
-            toolStrip1.Items.AddRange(new ToolStripItem[] { toolStripButton_New, toolStripButton_Clear, toolStripButton_Load, toolStripButton_Save });
+            toolStrip1.Items.AddRange(new ToolStripItem[] { toolStripButton_New, toolStripButton_Clear, toolStripButton_Load, toolStripButton_Save, toolStripButton1 });
             toolStrip1.Location = new Point(0, 0);
             toolStrip1.Name = "toolStrip1";
             toolStrip1.Size = new Size(933, 25);
@@ -125,6 +126,16 @@
             // 
             saveFileDialog1.Filter = "json|*.json";
             // 
+            // toolStripButton1
+            // 
+            toolStripButton1.DisplayStyle = ToolStripItemDisplayStyle.Image;
+            toolStripButton1.Image = (Image)resources.GetObject("toolStripButton1.Image");
+            toolStripButton1.ImageTransparentColor = Color.Magenta;
+            toolStripButton1.Name = "toolStripButton1";
+            toolStripButton1.Size = new Size(23, 22);
+            toolStripButton1.Text = "toolStripButton1";
+            toolStripButton1.Click += toolStripButton1_Click;
+            // 
             // MainForm
             // 
             AutoScaleDimensions = new SizeF(7F, 15F);
@@ -150,5 +161,6 @@
         private OpenFileDialog openFileDialog1;
         private ToolStripButton toolStripButton_Save;
         private SaveFileDialog saveFileDialog1;
+        private ToolStripButton toolStripButton1;
     }
 }

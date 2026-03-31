@@ -11,6 +11,9 @@
   <ItemGroup>
     <PackageReference Include="GMap.NET.Core" Version="2.1.7" />
     <PackageReference Include="GMap.NET.WinForms" Version="2.1.7" />
+    <PackageReference Include="NetTopologySuite" Version="1.15.2" />
+    <PackageReference Include="NetTopologySuite.Features" Version="1.15.0" />
+    <PackageReference Include="NetTopologySuite.IO.GeoJSON" Version="1.15.4" />
     <PackageReference Include="Newtonsoft.Json" Version="13.0.4" />
     <PackageReference Include="OsmSharp" Version="6.2.0" />
     <PackageReference Include="QuickGraph" Version="3.6.61119.7" />
