@@ -21,9 +21,12 @@ using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Windows.Forms;
+using static System.Windows.Forms.VisualStyles.VisualStyleElement.TrackBar;
 
 namespace TestMap
 {
+
+
     public partial class MainForm : Form
     {
         private GMapControl gMapControl;
@@ -41,8 +44,8 @@ namespace TestMap
         double minLng;
         double maxLng;
 
-        // Сохраняем дороги как списки точек
-        private List<List<PointLatLng>> roads = new List<List<PointLatLng>>();
+        // Сохраняем дороги как объекты с атрибутами
+        private List<RoadAttributes> roads = new List<RoadAttributes>();
 
         public MainForm()
         {
@@ -119,11 +122,84 @@ namespace TestMap
 
                 if (points.Count > 1)
                 {
-                    roads.Add(points);
+                    // --- Вычисление атрибутов ---
+                    long id = way.Id ?? -1;
+                    long sourceNode = way.Nodes.Length > 0 ? way.Nodes[0] : -1;
+                    long targetNode = way.Nodes.Length > 1 ? way.Nodes[way.Nodes.Length - 1] : -1;
+                    bool oneWay = way.Tags.ContainsKey("oneway") && (way.Tags.GetValue("oneway") == "yes" || way.Tags.GetValue("oneway") == "true" || way.Tags.GetValue("oneway") == "1");
+                    string type = way.Tags.GetValue("highway");
+                    int priority = GetPriorityByHighwayType(type);
+
+                    double maxSpeedForward = ParseMaxSpeed(way.Tags.GetValue("maxspeed"));
+                    double maxSpeedBackward = oneWay ? 0 : maxSpeedForward; // Если односторонняя, то назад = 0
+
+                    // Пример вычисления длины (в градусах, приближённо)
+                    double length = CalculateApproximateLength(points);
+
+                    var road = new RoadAttributes
+                    {
+                        Id = id,
+                        Source = sourceNode,
+                        Target = targetNode,
+                        OneWay = oneWay,
+                        Type = type,
+                        Priority = priority,
+                        MaxSpeedForward = maxSpeedForward,
+                        MaxSpeedBackward = maxSpeedBackward,
+                        Length = length,
+                        Geometry = points
+                    };
+
+                    roads.Add(road);
                 }
             }
 
             MessageBox.Show($"Загружено {roads.Count} дорог(и).");
+        }
+
+        private int GetPriorityByHighwayType(string highwayType)
+        {
+            // Простое сопоставление типа дороги приоритету
+            switch (highwayType?.ToLower())
+            {
+                case "motorway": return 1;
+                case "trunk": return 2;
+                case "primary": return 3;
+                case "secondary": return 4;
+                case "tertiary": return 5;
+                case "unclassified": return 6;
+                case "residential": return 7;
+                default: return 10; // lowest priority
+            }
+        }
+
+        private double ParseMaxSpeed(string maxSpeedTag)
+        {
+            if (string.IsNullOrEmpty(maxSpeedTag)) return 0;
+
+            // Попробуем извлечь число из строки (например, "50 km/h" -> 50)
+            var parts = maxSpeedTag.Split(' ');
+            if (double.TryParse(parts[0], out double speed))
+            {
+                return speed;
+            }
+            return 0;
+        }
+
+        private double CalculateApproximateLength(List<PointLatLng> points)
+        {
+            // Простое вычисление длины линии (в градусах, приближённо)
+            if (points.Count < 2) return 0;
+
+            double totalLength = 0;
+            for (int i = 1; i < points.Count; i++)
+            {
+                var p1 = points[i - 1];
+                var p2 = points[i];
+                // Простое евклидово расстояние между двумя точками (в градусах)
+                totalLength += Math.Sqrt(Math.Pow(p2.Lat - p1.Lat, 2) + Math.Pow(p2.Lng - p1.Lng, 2));
+            }
+            return totalLength;
         }
 
         private void SaveRoadsAsGeoJson(string filePath)
@@ -134,15 +210,24 @@ namespace TestMap
                     new JProperty("type", "Feature"),
                     new JProperty("geometry", new JObject(
                         new JProperty("type", "LineString"),
-                        new JProperty("coordinates", new JArray(road.Select(p => new JArray(p.Lng, p.Lat))))
+                        new JProperty("coordinates", new JArray(road.Geometry.Select(p => new JArray(p.Lng, p.Lat))))
                     )),
                     new JProperty("properties", new JObject(
-                        new JProperty("name", "road")
+                        new JProperty("id", road.Id),
+                        new JProperty("source", road.Source),
+                        new JProperty("target", road.Target),
+                        new JProperty("reverse", road.Reverse),
+                        new JProperty("oneway", road.OneWay),
+                        new JProperty("type", road.Type),
+                        new JProperty("priority", road.Priority),
+                        new JProperty("maxspeedForward", road.MaxSpeedForward),
+                        new JProperty("maxspeedBackward", road.MaxSpeedBackward),
+                        new JProperty("length", road.Length)
                     ))
                 )))));
 
             File.WriteAllText(filePath, featureCollection.ToString(Formatting.Indented));
-            MessageBox.Show($"Дороги {filePath} в формате GeoJSON");
+            MessageBox.Show($"Дороги сохранены в {filePath} в формате GeoJSON");
         }
 
 
@@ -154,7 +239,7 @@ namespace TestMap
             jsonString = File.ReadAllText(filePath);
             JObject geoJsonObj = JObject.Parse(jsonString);
 
-            var loadedRoads = new List<List<PointLatLng>>();
+            var loadedRoads = new List<RoadAttributes>();
 
             if ((string)geoJsonObj["type"] == "FeatureCollection")
             {
@@ -164,14 +249,32 @@ namespace TestMap
                     if ((string)feature["geometry"]["type"] == "LineString")
                     {
                         var coordinates = (JArray)feature["geometry"]["coordinates"];
-                        var road = new List<PointLatLng>();
+                        var geometry = new List<PointLatLng>();
                         foreach (JArray coord in coordinates)
                         {
                             double lng = (double)coord[0];
                             double lat = (double)coord[1];
-                            road.Add(new PointLatLng(lat, lng));
+                            geometry.Add(new PointLatLng(lat, lng));
                         }
-                        if (road.Count > 1)
+
+                        // Загружаем атрибуты
+                        var props = (JObject)feature["properties"];
+                        var road = new RoadAttributes
+                        {
+                            Id = props.ContainsKey("id") ? (long)props["id"] : -1,
+                            Source = props.ContainsKey("source") ? (long)props["source"] : -1,
+                            Target = props.ContainsKey("target") ? (long)props["target"] : -1,
+                            Reverse = props.ContainsKey("reverse") ? (double)props["reverse"] : -1,
+                            OneWay = props.ContainsKey("oneway") ? (bool)props["oneway"] : false,
+                            Type = props.ContainsKey("type") ? (string)props["type"] : "",
+                            Priority = props.ContainsKey("priority") ? (int)props["priority"] : 0,
+                            MaxSpeedForward = props.ContainsKey("maxspeedForward") ? (double)props["maxspeedForward"] : 0,
+                            MaxSpeedBackward = props.ContainsKey("maxspeedBackward") ? (double)props["maxspeedBackward"] : 0,
+                            Length = props.ContainsKey("length") ? (double)props["length"] : 0,
+                            Geometry = geometry
+                        };
+
+                        if (road.Geometry.Count > 1)
                         {
                             loadedRoads.Add(road);
                         }
@@ -182,18 +285,6 @@ namespace TestMap
             roads = loadedRoads;
         }
 
-        // Обновленный метод для сохранения JSON (старый формат), если нужно
-        private void SaveRoadsToJson(string filePath)
-        {
-            var roadsForSerialization = roads.Select(road =>
-                road.Select(p => new { lat = p.Lat, lng = p.Lng }).ToList()
-            ).ToList();
-
-            string json = JsonConvert.SerializeObject(roadsForSerialization, Formatting.Indented);
-            File.WriteAllText(filePath, json);
-
-            MessageBox.Show($"Дороги сохранены в {filePath} в старом формате JSON");
-        }
 
         private void DrawRoadsOnMap(Color color)
         {
@@ -201,7 +292,7 @@ namespace TestMap
 
             foreach (var road in roads)
             {
-                var route = new GMapRoute(road, "road_" + Guid.NewGuid().ToString())
+                var route = new GMapRoute(road.Geometry, $"road_{road.Id}")
                 {
                     Stroke = new Pen(color, 1)
                 };
@@ -209,9 +300,52 @@ namespace TestMap
             }
 
             gMapControl.Overlays.Add(overlay);
-            gMapControl.ZoomAndCenterMarkers(overlay.Id);
+            //gMapControl.ZoomAndCenterMarkers(overlay.Id);
             gMapControl.Refresh();
         }
+
+
+        private void DrawPoinOnMap(List<PointLatLng> points, GMarkerGoogleType metka)
+        {
+            var pointsOverlay = new GMapOverlay("points");
+
+            foreach (var point in points)
+            {
+                var marker = new GMarkerGoogle(point, metka) // Можно выбрать другой тип маркера
+                {
+                    ToolTipText = $"Point: {point.Lat}, {point.Lng}",
+                    // Изменяем цвет маркера путем создания Bitmap или использования готового изображения может быть сложно,
+                    // поэтому часто используются стандартные типы или кастомные изображения.
+                    // Для простоты можно использовать один цвет, но GMarkerGoogle не меняет цвет через свойства напрямую.
+                    // Альтернатива - рисовать кружок.
+                };
+
+                // Альтернатива: создание кастомного маркера с цветом
+                //var customMarker = new GMapMarkerGoogleRotated(point) // Используйте GMapMarker, если GMapMarkerGoogleRotated недоступен
+                //{
+                //    ToolTipText = $"Point: {point.Lat}, {point.Lng}"
+                //};
+
+                // Но самый простой способ изменить внешний вид - использовать Overlay.Polygons или Overlay.Markers с кастомным рендерингом.
+                // Для простоты используем стандартный маркер и добавим его.
+                pointsOverlay.Markers.Add(marker);
+            }
+
+            // Более подходящий способ для отображения множества точек - это создание GMapRoute с очень короткими сегментами или просто список маркеров.
+            // Но так как маркеры могут перекрываться, лучше использовать кастомный GMapPolygon или GMapRoute с толщиной 0 и заливкой.
+            // Самый простой способ - использовать GMapRoute с минимальной длиной.
+
+            // Альтернативный способ - создать кастомный маркер с цветом
+            //foreach (var point in points)
+            //{
+            //    pointsOverlay.Markers.Add(new CustomColoredMarker(point, color));
+            //}
+
+            gMapControl.Overlays.Add(pointsOverlay);
+            //gMapControl.ZoomAndCenterMarkers(pointsOverlay.Id);
+            gMapControl.Refresh();
+        }
+
 
         private void toolStripButton_New_Click(object sender, EventArgs e)
         {
@@ -241,16 +375,7 @@ namespace TestMap
                 ClearMap();
                 roads.Clear();
 
-                if (Path.GetExtension(filePath).ToLower() == ".geojson")
-                {
-                    LoadRoadsFromGeoJson(filePath);
-                }
-                else
-                {
-                    // Поддержка старого формата JSON при необходимости
-                    string jsonString = File.ReadAllText(filePath);
-                    roads = JsonConvert.DeserializeObject<List<List<PointLatLng>>>(jsonString);
-                }
+                LoadRoadsFromGeoJson(filePath);
 
                 DrawRoadsOnMap(Color.Red);
             }
@@ -260,7 +385,7 @@ namespace TestMap
         {
             // Фильтруем дороги по выделенной области
             var filteredRoads = roads.Where(road =>
-                road.Any(p => p.Lat >= minLat && p.Lat <= maxLat && p.Lng >= minLng && p.Lng <= maxLng)
+                road.Geometry.Any(p => p.Lat >= minLat && p.Lat <= maxLat && p.Lng >= minLng && p.Lng <= maxLng)
             ).ToList();
 
             saveFileDialog1.Filter = "GeoJSON files (*.geojson)|*.geojson|JSON files (*.json)|*.json|All files (*.*)|*.*";
@@ -278,10 +403,19 @@ namespace TestMap
                             new JProperty("type", "Feature"),
                             new JProperty("geometry", new JObject(
                                 new JProperty("type", "LineString"),
-                                new JProperty("coordinates", new JArray(road.Select(p => new JArray(p.Lng, p.Lat))))
+                                new JProperty("coordinates", new JArray(road.Geometry.Select(p => new JArray(p.Lng, p.Lat))))
                             )),
                             new JProperty("properties", new JObject(
-                                new JProperty("name", "filtered_road")
+                                new JProperty("id", road.Id),
+                                new JProperty("source", road.Source),
+                                new JProperty("target", road.Target),
+                                new JProperty("reverse", road.Reverse),
+                                new JProperty("oneway", road.OneWay),
+                                new JProperty("type", road.Type),
+                                new JProperty("priority", road.Priority),
+                                new JProperty("maxspeedForward", road.MaxSpeedForward),
+                                new JProperty("maxspeedBackward", road.MaxSpeedBackward),
+                                new JProperty("length", road.Length)
                             ))
                         )))));
 
@@ -290,16 +424,28 @@ namespace TestMap
                 }
                 else
                 {
-                    // Сохраняем в старом формате JSON
-                    string json = JsonConvert.SerializeObject(filteredRoads.Select(r =>
-                        r.Select(p => new { lat = p.Lat, lng = p.Lng }).ToList()
-                    ).ToList(), Formatting.Indented);
+                    // Сохраняем в старом формате JSON с атрибутами
+                    var roadsForSerialization = filteredRoads.Select(road => new
+                    {
+                        id = road.Id,
+                        source = road.Source,
+                        target = road.Target,
+                        oneway = road.OneWay,
+                        type = road.Type,
+                        priority = road.Priority,
+                        maxspeedForward = road.MaxSpeedForward,
+                        maxspeedBackward = road.MaxSpeedBackward,
+                        length = road.Length,
+                        geometry = road.Geometry.Select(p => new { lat = p.Lat, lng = p.Lng }).ToList()
+                    }).ToList();
 
+                    string json = JsonConvert.SerializeObject(roadsForSerialization, Formatting.Indented);
                     File.WriteAllText(fileName, json);
-                    MessageBox.Show($"Сохранено {filteredRoads.Count} дорог(и) в {fileName} в старом формате JSON");
+                    MessageBox.Show($"Сохранено {filteredRoads.Count} дорог(и) в {fileName} в формате JSON");
                 }
             }
         }
+
 
         private void OnMapMouseDown(object sender, MouseEventArgs e)
         {
@@ -364,29 +510,28 @@ namespace TestMap
             var spatial = new GeographySpatialOperation();
             var mapBuilder = new RoadMapBuilder(spatial);
 
-            MessageBox.Show("Loading road map...");
+            //MessageBox.Show("Loading road map...");
             var roads = ReadRoads(spatial);
             var map = mapBuilder.AddRoads(roads).Build();
-            MessageBox.Show("The road map has been loaded");
+            //MessageBox.Show("The road map has been loaded");
 
             //var router = new PrecomputedDijkstraRouter<Road, RoadPoint>(map, Costs.TimePriorityCost, Costs.DistanceCost, 1000D);
             var router = new DijkstraRouter<Road, RoadPoint>();
 
-            var matcher = new Matcher<MatcherCandidate, MatcherTransition, MatcherSample>(
-                map, router, Costs.TimePriorityCost, spatial);
-            matcher.MaxDistance = 1000; // set maximum searching distance between two GPS points to 1000 meters.
-            matcher.MaxRadius = 200.0; // sets maximum radius for candidate selection to 200 meters
+            var matcher = new Matcher<MatcherCandidate, MatcherTransition, MatcherSample>(map, router, Costs.TimePriorityCost, spatial);
+            matcher.MaxDistance = 100; // set maximum searching distance between two GPS points to 100 meters.
+            matcher.MaxRadius = 20.0; // sets maximum radius for candidate selection to 20 meters
 
-            MessageBox.Show("Loading GPS samples...");
-            var samples = ReadSamples().OrderBy(s => s.Time).ToList();
-            MessageBox.Show("GPS samples loaded. [count={0}]", samples.Count.ToString());
+            //MessageBox.Show("Loading GPS samples...");
+            var samples = ReadSamples().ToList();//.OrderBy(s => s.Time).ToList();
+            //MessageBox.Show($"GPS samples loaded. [count={samples.Count}]");
 
-            MessageBox.Show("Starting Offline map-matching...");
+            //MessageBox.Show("Starting Offline map-matching...");
             OfflineMatch(matcher, samples);
 
 
-            MessageBox.Show("Starting Online map-matching...");
-            //Uncomment below line to see how online-matching works
+            //MessageBox.Show("Starting Online map-matching...");
+            //Uncomment below line to see how online - matching works
             //OnlineMatch(matcher, samples);
 
             MessageBox.Show("All done!");
@@ -394,74 +539,87 @@ namespace TestMap
 
         private IEnumerable<RoadInfo> ReadRoads(ISpatialOperation spatial)
         {
+            if (jsonString == null)
+            {
+                MessageBox.Show("No road data loaded. Please load a GeoJSON file with roads first.");
+                return Enumerable.Empty<RoadInfo>();
+            }
             var reader = new GeoJsonReader();
             var fc = reader.Read<FeatureCollection>(jsonString);
 
+            List<RoadInfo> roadsInfo = new List<RoadInfo>();
             foreach (var feature in fc.Features)
             {
                 var lineGeom = feature.Geometry as ILineString;
-
-                yield return new RoadInfo(
-                    0,//Convert.ToInt64(feature.Attributes["gid"]),
-                    0,//Convert.ToInt64(feature.Attributes["source"]),
-                    0,//Convert.ToInt64(feature.Attributes["target"]),
-                    true,//(double)feature.Attributes["reverse"] >= 0D ? false : true,
+                roadsInfo.Add(new RoadInfo(
+                    Convert.ToInt64(feature.Attributes["id"]),
+                    Convert.ToInt64(feature.Attributes["source"]),
+                    Convert.ToInt64(feature.Attributes["target"]),
+                    (double)feature.Attributes["reverse"] >= 0D ? false : true,
                     (short)0,
-                    0f, //Convert.ToSingle(feature.Attributes["priority"]),
+                    Convert.ToSingle(feature.Attributes["priority"]),
                     120f,
                     120f,
                     Convert.ToSingle(spatial.Length(lineGeom)),
-                    lineGeom);
+                    lineGeom)
+                    );
             }
+            return roadsInfo;
         }
 
         private IEnumerable<MatcherSample> ReadSamples()
-        {            
-            var json = File.ReadAllText(@"samples.oneday.geojson");
-            var reader = new GeoJsonReader();
-            var fc = reader.Read<FeatureCollection>(json);
-            var timeFormat = "yyyy-MM-dd-HH.mm.ss";
+        {
+            var txt = File.ReadAllLines(@"dataset.log");
+
+
             var samples = new List<MatcherSample>();
-            foreach (var i in fc.Features)
+            List<MatcherSample> matcherSamples = new List<MatcherSample>();
+            foreach (var i in txt)
             {
-                var p = i.Geometry as IPoint;
-                var coord2D = new Coordinate2D(p.X, p.Y);
-                var timeStr = i.Attributes["time"].ToString().Substring(0, timeFormat.Length);
-                var time = DateTimeOffset.ParseExact(timeStr, timeFormat, CultureInfo.InvariantCulture);
+                var str = i.Split(';');
+                if (!double.TryParse(str[2].Replace(',', '.'), NumberStyles.Float, CultureInfo.InvariantCulture, out double lat)) continue;
+                if (!double.TryParse(str[1].Replace(',', '.'), NumberStyles.Float, CultureInfo.InvariantCulture, out double lng)) continue;
+
+                var coord2D = new Coordinate2D(lat, lng);
+
+                var timeFormats = new[] { "HH:mm:ss.fff", "HH:mm:ss" };
+                if (!DateTimeOffset.TryParseExact(str[0], timeFormats, CultureInfo.InvariantCulture, DateTimeStyles.None, out var time))
+                    continue;
+
                 var longTime = time.ToUnixTimeMilliseconds();
-                yield return new MatcherSample(longTime, time, coord2D);
+                matcherSamples.Add(new MatcherSample(longTime, time, coord2D));
             }
+            return matcherSamples;
         }
 
-        private void OfflineMatch(
-            Matcher<MatcherCandidate, MatcherTransition, MatcherSample> matcher,
-            IReadOnlyList<MatcherSample> samples)
+        private void OfflineMatch(Matcher<MatcherCandidate, MatcherTransition, MatcherSample> matcher, IReadOnlyList<MatcherSample> samples)
         {
             var kstate = new MatcherKState();
 
             //Do the offline map-matching
-            MessageBox.Show("Doing map-matching...");
-            var startedOn = DateTime.Now;
+            //MessageBox.Show("Doing map-matching...");
+            var startedOn = DateTime.MinValue;
             foreach (var sample in samples)
             {
                 var vector = matcher.Execute(kstate.Vector(), kstate.Sample, sample);
                 kstate.Update(vector, sample);
             }
 
-            MessageBox.Show("Fetching map-matching results...");
+            //MessageBox.Show("Fetching map-matching results...");
             var candidatesSequence = kstate.Sequence();
             var timeElapsed = DateTime.Now - startedOn;
-            //MessageBox.Show("Map-matching elapsed time: {0}, Speed={1} samples/second", timeElapsed, samples.Count / timeElapsed.TotalSeconds);
-            //MessageBox.Show("Results: [count={0}]", candidatesSequence.Count());
+            MessageBox.Show($"Map-matching elapsed time: {timeElapsed}, Speed={samples.Count / timeElapsed.TotalSeconds} samples/second");
+            MessageBox.Show($"Results: [count={candidatesSequence.Count()}]");
             var csvLines = new List<string>();
-            csvLines.Add("time,lng,lat,azimuth");
+            csvLines.Add("time;lat;lng");
             int matchedCandidateCount = 0;
             foreach (var cand in candidatesSequence)
             {
                 var roadId = cand.Point.Edge.RoadInfo.Id; // original road id
                 var heading = cand.Point.Edge.Headeing; // heading
                 var coord = cand.Point.Coordinate; // GPS position (on the road)
-                csvLines.Add(string.Format("{0},{1},{2},{3}", cand.Sample.Time.ToUnixTimeSeconds(), coord.X, coord.Y, cand.Point.Azimuth));
+
+                csvLines.Add(string.Format("{0};{1};{2}", cand.Sample.Time.ToUnixTimeSeconds(), coord.Y, coord.X));
                 if (cand.HasTransition)
                 {
                     var geom = cand.Transition.Route.ToGeometry(); // path geometry(LineString) from last matching candidate
@@ -472,13 +630,43 @@ namespace TestMap
             //MessageBox.Show("Matched Candidates: {0}, Rate: {1}%", matchedCandidateCount, matchedCandidateCount * 100 / samples.Count());
 
             var csvFile = "samples.output.csv";
-            MessageBox.Show("Writing output file: {0}", csvFile);
+            MessageBox.Show($"Writing output file: {csvFile}");
             File.WriteAllLines(csvFile, csvLines);
+        }
+
+        private void toolStripButton_Matcher_Click(object sender, EventArgs e)
+        {
+            InitializeMatching();
         }
 
         private void toolStripButton1_Click(object sender, EventArgs e)
         {
-            InitializeMatching();
+            var track = File.ReadAllLines(@"dataset.log");
+            
+            List<PointLatLng> points = new List<PointLatLng>();
+            foreach (var item in track)
+            {
+                var str = item.Split(';');
+                if (!double.TryParse(str[1].Replace(',', '.'), NumberStyles.Float, CultureInfo.InvariantCulture, out double lat)) continue;
+                if (!double.TryParse(str[2].Replace(',', '.'), NumberStyles.Float, CultureInfo.InvariantCulture, out double lng)) continue;
+                points.Add(new PointLatLng(lat, lng));
+            }
+            DrawPoinOnMap(points, GMarkerGoogleType.green_small);
+        }
+
+        private void toolStripButton2_Click(object sender, EventArgs e)
+        {
+            var track = File.ReadAllLines(@"samples.output.csv");
+
+            List<PointLatLng> points = new List<PointLatLng>();
+            foreach (var item in track)
+            {
+                var str = item.Split(';');
+                if (!double.TryParse(str[1].Replace(',', '.'), NumberStyles.Float, CultureInfo.InvariantCulture, out double lat)) continue;
+                if (!double.TryParse(str[2].Replace(',', '.'), NumberStyles.Float, CultureInfo.InvariantCulture, out double lng)) continue;
+                points.Add(new PointLatLng(lat, lng));
+            }
+            DrawPoinOnMap(points, GMarkerGoogleType.orange_small);
         }
     }
 }
